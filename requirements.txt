@@ -1,5 +1,9 @@
 streamlit>=1.36
 pandas>=2.2
-openai>=1.51
-scikit-learn>=1.5
+transformers>=4.44
+torch>=2.3
+accelerate>=0.33
+sentencepiece>=0.2
+safetensors>=0.4
+tokenizers>=0.19
 python-dotenv>=1.0
