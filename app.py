@@ -1,60 +1,46 @@
-# app.py
+# app_oss.py
 import os
 import json
 import time
+import torch
 import pandas as pd
 import streamlit as st
 from typing import Dict, Any, List, Optional
 
-# Try OpenAI SDK v1
-try:
-    from openai import OpenAI
-    _HAS_OPENAI = True
-except Exception:
-    _HAS_OPENAI = False
+from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline
 
-APP_TITLE = "🎯 Content Atomizer & Topicizer (Podcast → Multi‑channel)"
+APP_TITLE = "🎯 Content Atomizer (OSS)"
 APP_DESC = """
-Paste a transcript or a general topic and get:
-- Search intent & related subtopics
-- Keyword lists (short, mid, long-tail)
-- Content recommendations (SEO articles, social, LinkedIn)
-- An atomization plan to repurpose across formats
-
-Works best with an OpenAI API key. If not provided, a lightweight local fallback will generate heuristic outputs.
+ Carga un modelo pequeño de Hugging Face(local o al vuelo) y produce salidas estructuradas en **JSON**.
 """
 
-def get_openai_client() -> Optional["OpenAI"]:
-    api_key = os.getenv("OPENAI_API_KEY") or st.secrets.get("OPENAI_API_KEY", None)
-    if _HAS_OPENAI and api_key:
-        return OpenAI(api_key=api_key)
-    return None
-
-LLM_MODEL_DEFAULT = os.getenv("LLM_MODEL", "gpt-4o-mini")
-EMBED_MODEL_DEFAULT = os.getenv("EMBED_MODEL", "text-embedding-3-small")
+# ---- Config ----
+DEFAULT_MODEL_ID = os.getenv("MODEL_ID", "Qwen/Qwen2.5-0.5B-Instruct")
+GEN_KWARGS = {
+    "max_new_tokens": int(os.getenv("MAX_NEW_TOKENS", "800")),
+    "temperature": float(os.getenv("TEMPERATURE", "0.2")),
+    "top_p": float(os.getenv("TOP_P", "0.95")),
+    "do_sample": True
+}
 
 SYSTEM_PROMPT = """You are an expert content strategist for Spanish-speaking creators.
-Given a transcript or general topic, produce concise, actionable outputs in Spanish.
-Be practical. Avoid fluff. Return valid JSON following the provided schema exactly.
+Given a transcript or general topic, return concise, actionable outputs in Spanish.
+Return **ONLY** strictly valid JSON. No prose outside JSON.
 """
 
 JSON_SCHEMA = {
     "type": "object",
     "properties": {
-        "search_intent": {"type": "string", "description": "Primary search intent behind the topic (informational, navigational, transactional, commercial investigation)."},
-        "related_topics": {
-            "type": "array",
-            "items": {"type": "string"},
-            "description": "Topically related ideas or subtopics."
-        },
+        "search_intent": {"type": "string"},
+        "related_topics": {"type": "array", "items": {"type": "string"}},
         "keywords": {
             "type": "object",
             "properties": {
                 "short_tail": {"type": "array", "items": {"type": "string"}},
                 "mid_tail": {"type": "array", "items": {"type": "string"}},
-                "long_tail": {"type": "array", "items": {"type": "string"}},
+                "long_tail": {"type": "array", "items": {"type": "string"}}
             },
-            "required": ["short_tail", "mid_tail", "long_tail"]
+            "required": ["short_tail","mid_tail","long_tail"]
         },
         "content_recommendations": {
             "type": "object",
@@ -64,13 +50,9 @@ JSON_SCHEMA = {
                 "linkedin_posts": {"type": "array", "items": {"type": "string"}},
                 "email_newsletter": {"type": "array", "items": {"type": "string"}}
             },
-            "required": ["seo_articles", "social_posts", "linkedin_posts", "email_newsletter"]
+            "required": ["seo_articles","social_posts","linkedin_posts","email_newsletter"]
         },
-        "atomization_plan": {
-            "type": "array",
-            "description": "List of smaller content pieces derived from the main asset; include format and angle.",
-            "items": {"type": "string"}
-        },
+        "atomization_plan": {"type": "array", "items": {"type": "string"}},
         "metadata": {
             "type": "object",
             "properties": {
@@ -81,45 +63,10 @@ JSON_SCHEMA = {
             "required": ["posting_cadence_recommendation"]
         }
     },
-    "required": ["search_intent", "related_topics", "keywords", "content_recommendations", "atomization_plan", "metadata"]
+    "required": ["search_intent","related_topics","keywords","content_recommendations","atomization_plan","metadata"]
 }
 
-def llm_topicize(client, text: str, language: str = "es") -> Dict[str, Any]:
-    """Call OpenAI to get structured topicalization JSON, with retry/repair if needed."""
-    user_prompt = f"""Contenido fuente (idioma {language}):
----
-{text.strip()[:12000]}
----
-
-Instrucciones:
-1) Analiza el contenido y determina intención de búsqueda y temas relacionados.
-2) Genera listas de palabras clave (short/mid/long tail).
-3) Recomienda formatos y titulares concretos para: artículos SEO, publicaciones sociales, LinkedIn y newsletter.
-4) Propón una atomización detallada (≥10 piezas) que cubra carruseles, hilos, shorts, clips, infografías, etc.
-5) Devuelve SOLO JSON que cumpla EXACTAMENTE este esquema:
-{json.dumps(JSON_SCHEMA, ensure_ascii=False)}
-"""
-    # Try 2 attempts
-    for _ in range(2):
-        try:
-            resp = client.chat.completions.create(
-                model=LLM_MODEL_DEFAULT,
-                messages=[
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": user_prompt},
-                ],
-                temperature=0.3,
-                response_format={"type": "json_object"},
-            )
-            js = resp.choices[0].message.content
-            return json.loads(js)
-        except Exception as e:
-            time.sleep(0.8)
-            continue
-    # Final fallback raises
-    raise RuntimeError("No se pudo obtener una respuesta JSON válida del LLM.")
-
-# --- Lightweight local fallbacks (heuristic) ---
+# --- Heurístico local (fallback) ---
 import re
 from collections import Counter
 def _tokenize(text: str) -> List[str]:
@@ -129,7 +76,6 @@ def _tokenize(text: str) -> List[str]:
 def local_topicize(text: str) -> Dict[str, Any]:
     words = _tokenize(text)
     common = [w for w, _ in Counter(words).most_common(60)]
-    # naive n-grams
     mid_tail = list(dict.fromkeys([" ".join(words[i:i+2]) for i in range(len(words)-1)]))[:30]
     long_tail = list(dict.fromkeys([" ".join(words[i:i+3]) for i in range(len(words)-2)]))[:30]
     related = [w for w in common if w not in set(("que","para","con","los","las","por","del","una","como","pero"))][:12]
@@ -162,27 +108,66 @@ def local_topicize(text: str) -> Dict[str, Any]:
         "metadata": {
             "reading_levels": ["divulgativo", "intermedio"],
             "posting_cadence_recommendation": "3-4 piezas por semana derivadas del episodio.",
-            "notes": "Resultados generados sin LLM (modo fallback)."
+            "notes": "Resultados generados en modo heurístico."
         }
     }
     return out
 
-def json_to_frames(js: Dict[str, Any]) -> Dict[str, pd.DataFrame]:
-    kw = js.get("keywords", {})
-    frames = {}
-    frames["Palabras clave"] = pd.DataFrame({
-        "short_tail": pd.Series(kw.get("short_tail", [])),
-        "mid_tail": pd.Series(kw.get("mid_tail", [])),
-        "long_tail": pd.Series(kw.get("long_tail", [])),
-    })
-    frames["Temas relacionados"] = pd.DataFrame({"related_topics": js.get("related_topics", [])})
-    for k, v in js.get("content_recommendations", {}).items():
-        frames[f"Recomendaciones · {k}"] = pd.DataFrame({k: v})
-    frames["Atomización"] = pd.DataFrame({"pieza": js.get("atomization_plan", [])})
-    return frames
+# --- Carga de modelo ---
+@st.cache_resource(show_spinner=False)
+def load_pipe(model_id: str):
+    tokenizer = AutoTokenizer.from_pretrained(model_id)
+    model = AutoModelForCausalLM.from_pretrained(
+        model_id,
+        torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
+        device_map="auto"
+    )
+    return pipeline(
+        "text-generation",
+        model=model,
+        tokenizer=tokenizer,
+        # Important to prevent very long ram use
+        max_new_tokens=GEN_KWARGS["max_new_tokens"],
+        do_sample=GEN_KWARGS["do_sample"],
+        temperature=GEN_KWARGS["temperature"],
+        top_p=GEN_KWARGS["top_p"]
+    )
+
+def llm_topicize(pipe, text: str, min_items: int = 10, language: str = "es") -> Dict[str, Any]:
+    # System + user in a simple instruct style (works with many small instruct models)
+    schema_str = json.dumps(JSON_SCHEMA, ensure_ascii=False)
+    prompt = f"""[SYSTEM]
+{SYSTEM_PROMPT}
+
+[USER]
+Contenido fuente (idioma {language}):
+---
+{text.strip()[:12000]}
+---
+
+Instrucciones:
+1) Analiza el contenido y determina intención de búsqueda y temas relacionados.
+2) Genera listas de palabras clave (short/mid/long tail).
+3) Recomienda formatos y titulares concretos para: artículos SEO, publicaciones sociales, LinkedIn y newsletter.
+4) Propón una atomización detallada (≥{min_items} piezas) que cubra carruseles, hilos, shorts, clips, infografías, etc.
+5) Devuelve SOLO JSON que cumpla EXACTAMENTE este esquema:
+{schema_str}
+"""
+    raw = pipe(prompt)[0]["generated_text"]
+    # Intenta extraer el primer bloque JSON
+    start = raw.find("{")
+    end = raw.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        js_str = raw[start:end+1]
+        try:
+            return json.loads(js_str)
+        except Exception:
+            pass
+    # Fallback
+    return local_topicize(text)
 
 def export_markdown(topic_input: str, js: Dict[str, Any]) -> str:
-    lines = [f"# Plan de contenidos (generado)",
+    lines = [f"# Plan de contenidos (OSS)",
              f"_Fecha: {time.strftime('%Y-%m-%d')}_",
              "",
              "## Input",
@@ -219,62 +204,40 @@ def export_markdown(topic_input: str, js: Dict[str, Any]) -> str:
     return md
 
 def run():
-    st.set_page_config(page_title="Content Atomizer", page_icon="🎯", layout="wide")
+    st.set_page_config(page_title="Content Atomizer (OSS)", page_icon="🎯", layout="wide")
     st.title(APP_TITLE)
     st.caption(APP_DESC)
 
     with st.sidebar:
-        st.subheader("LLM")
-        st.write("Provee tu **OPENAI_API_KEY** en *Secrets* o como variable de entorno.")
-        model = st.text_input("Modelo (chat)", value=LLM_MODEL_DEFAULT)
-        embed_model = st.text_input("Modelo (embeddings)", value=EMBED_MODEL_DEFAULT)
-        st.session_state["model"] = model
-        st.session_state["embed_model"] = embed_model
-        st.divider()
-        export_btn = st.button("📝 Exportar a Markdown", key="export_md", disabled=True)
+        st.subheader("Modelo OSS")
+        model_id = st.text_input("Hugging Face model id", value=DEFAULT_MODEL_ID, help="Ej.: Qwen/Qwen2.5-0.5B-Instruct o TinyLlama/TinyLlama-1.1B-Chat-v1.0")
+        tokens = st.number_input("max_new_tokens", min_value=128, max_value=2048, value=GEN_KWARGS["max_new_tokens"], step=32)
+        temperature = st.slider("Creatividad", 0.0, 1.0, float(GEN_KWARGS["temperature"]), 0.05)
+        st.session_state["gen_cfg"] = {"max_new_tokens": int(tokens), "temperature": float(temperature)}
+        st.write("Si falla o la salida no es JSON válido, usaremos un **heurístico local**.")
 
     tab1, tab2 = st.tabs(["➕ Entrada", "📊 Resultados"])
-
     with tab1:
         mode = st.radio("Modo de entrada", ["Tema general", "Transcripción de episodio"], horizontal=True)
-        text = st.text_area(
-            "Pega aquí tu texto",
-            height=240,
-            placeholder="Ej.: Inteligencia artificial aplicada al marketing de contenidos... o pega la transcripción de tu episodio."
-        )
-        uploaded = st.file_uploader("…o sube un archivo .txt / .md", type=["txt", "md"])
-
+        text = st.text_area("Pega el contenido", height=240)
+        uploaded = st.file_uploader("…o sube .txt / .md", type=["txt","md"])
         if uploaded and not text.strip():
             text = uploaded.read().decode("utf-8", errors="ignore")
-
-        colA, colB = st.columns([1,1])
-        with colA:
-            min_items = st.slider("Mínimo de ideas por sección", 5, 20, 10)
-        with colB:
-            temperature = st.slider("Creatividad (temperature)", 0.0, 1.0, 0.3, 0.1)
-
-        run_btn = st.button("🚀 Generar plan", type="primary", use_container_width=True)
+        min_items = st.slider("Mínimo de piezas de atomización", 5, 30, 12)
+        run_btn = st.button("🚀 Generar plan (OSS)", type="primary", use_container_width=True)
 
     if run_btn:
-        if not (text and text.strip()):
+        if not text.strip():
             st.error("Por favor pega o sube contenido.")
             st.stop()
-
-        client = get_openai_client()
-        if client:
-            # adjust global model based on sidebar
-            global LLM_MODEL_DEFAULT
-            LLM_MODEL_DEFAULT = st.session_state.get("model", LLM_MODEL_DEFAULT)
+        with st.spinner(f"Cargando/ejecutando {model_id}… (puede tardar la primera vez)"):
             try:
-                with st.spinner("Consultando LLM…"):
-                    js = llm_topicize(client, text)
+                pipe = load_pipe(model_id)
             except Exception as e:
-                st.warning("Fallo del LLM. Usando heurística local…")
-                js = local_topicize(text)
-        else:
-            st.info("No se detectó OPENAI_API_KEY. Usando heurística local.")
-            js = local_topicize(text)
-
+                st.error(f"No se pudo cargar el modelo {model_id}: {e}")
+                st.stop()
+        with st.spinner("Generando…"):
+            js = llm_topicize(pipe, text, min_items=min_items)
         st.session_state["last_input"] = text
         st.session_state["result_json"] = js
         st.success("¡Listo! Revisa la pestaña Resultados.")
@@ -295,7 +258,6 @@ def run():
                 st.write("**Short tail**:", ", ".join(kw.get("short_tail", [])) or "—")
                 st.write("**Mid tail**:", ", ".join(kw.get("mid_tail", [])) or "—")
                 st.write("**Long tail**:", ", ".join(kw.get("long_tail", [])) or "—")
-
             with b:
                 st.subheader("Cadencia sugerida")
                 st.write(js.get("metadata",{}).get("posting_cadence_recommendation","—"))
@@ -314,18 +276,17 @@ def run():
             for i, idea in enumerate(js.get("atomization_plan", []), 1):
                 st.markdown(f"{i}. {idea}")
 
-            # Exports
+            # Export
             md = export_markdown(st.session_state.get("last_input",""), js)
-            md_path = "plan_contenidos.md"
-            st.download_button("⬇️ Descargar Markdown", data=md, file_name=md_path, mime="text/markdown")
+            st.download_button("⬇️ Descargar Markdown", data=md, file_name="plan_contenidos_oss.md", mime="text/markdown")
 
-            # Keyword CSV
+            kw = js.get("keywords", {})
             kw_df = pd.DataFrame({
                 "short_tail": pd.Series(kw.get("short_tail", [])),
                 "mid_tail": pd.Series(kw.get("mid_tail", [])),
                 "long_tail": pd.Series(kw.get("long_tail", [])),
             })
-            st.download_button("⬇️ Descargar palabras clave (CSV)", data=kw_df.to_csv(index=False), file_name="keywords.csv", mime="text/csv")
+            st.download_button("⬇️ Descargar palabras clave (CSV)", data=kw_df.to_csv(index=False), file_name="keywords_oss.csv", mime="text/csv")
 
 if __name__ == "__main__":
     run()
