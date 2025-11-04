@@ -7,7 +7,7 @@
 
 ## 🧩 Descripción
 
-Esta aplicación convierte **transcripts o temas de podcast** en un **plan integral de contenidos**:
+Esta aplicación convierte **transcripts de un episodio o temas de podcast** en un **plan integral de contenidos**:
 
 - 🔍 Análisis de intención de búsqueda (TOFU / MOFU / BOFU)  
 - 🧠 Detección de temas relacionados  
